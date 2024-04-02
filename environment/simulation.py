@@ -25,10 +25,17 @@ class Pile:
         self.blocking = []
         self.end_plates = []
 
+    def get_plate(self):
+        plate = self.plates.pop()
+        return plate
+
+    def put_plate(self, plate):
+        self.plates.append(plate)
+
 
 class Crane:
     def __init__(self, env, name, id, x_velocity, y_velocity, safety_margin, weight_limit, initial_location,
-                 other_crane, piles, conveyors, monitor):
+                 other_crane, input_points, piles, conveyors, monitor, row_range=(0, 1), bay_range=(0, 43)):
         self.env = env
         self.name = name
         self.id = id
@@ -38,9 +45,12 @@ class Crane:
         self.weight_limit = weight_limit
         self.current_location = initial_location
         self.other_crane = other_crane
+        self.input_points = input_points
         self.piles = piles
         self.conveyors = conveyors
         self.monitor = monitor
+        self.row_range = row_range
+        self.bay_range = bay_range
 
         self.target_location = (-1.0, -1.0)
         self.safety_xcoord = -1.0
@@ -59,9 +69,12 @@ class Crane:
         self.event_loading = None
         self.event_prioritizing = None
 
+        self.start_time = 0.0
         self.idle_time = 0.0
         self.empty_travel_time = 0.0
         self.avoiding_time = 0.0
+
+        self.move_process = None
 
     def run(self):
         while True:
@@ -98,12 +111,20 @@ class Crane:
 
                 self.monitor.queue_loading[self.id] = self
                 self.event_loading = self.env.event()
-                loading_location_ids = yield self.event_loading
+                self.loading_locations = yield self.event_loading
+                self.unloading_locations = self.loading_locations[::-1]
 
-                for location_id in loading_location_ids:
-                    self.loading_locations.append(location_id)
+                self.move_process = self.env.process(self.move())
+                yield self.move_process
+                self.loading_locations = []
 
-                yield self.env.process(self.move())
+                self.status = "unloading"
+
+                self.move_process = self.env.process(self.move())
+                yield self.move_process
+                self.unloading_locations = []
+
+            self.status = "idle"
 
     def move(self):
         if self.status == "loading":
@@ -116,175 +137,148 @@ class Crane:
 
         idx = 0
         while True:
+            self.start_time = self.env.now
             self.target_location = location_list[idx]
-            flag = self.check_interference()
+            flag, safety_xcoord = self.check_interference()
             if flag:
+                self.other_crane.move_process.interrupt()
+
                 self.monitor.queue_prioritizing[self.id] = self
                 self.event_prioritizing = self.env.event()
                 priority = yield self.event_prioritizing
             else:
                 priority = "high"
 
+            if priority == "high":
+                dx = self.target_location[0] - self.current_location[0]
+                dy = self.target_location[1] - self.current_location[1]
+                avoidance = False
+            else:
+                dx = safety_xcoord - self.current_location[0]
+                dy = self.target_location[1] - self.current_location[1]
+                avoidance = True
+
             try:
                 if self.monitor.record_events:
-                    self.monitor.record(self.env.now, location=self.name, ship=ship.name,
-                                        operation=operation.name, event="Working Started", info=priority_score)
-                yield self.env.timeout(duration)
+                    self.monitor.record(self.env.now, "Move_from", crane=self.name,
+                                        location=self.location_mapping[self.current_coord].name, plate=None)
+
+                predicted_moving_time = min(abs(dx) / self.x_velocity, abs(dy) / self.y_velocity)
+                yield self.env.timeout(predicted_moving_time)
+
             except simpy.Interrupt as i:
                 if self.monitor.record_events:
-                    self.monitor.record(self.env.now, location=self.name, ship=ship.name,
-                                        operation=operation.name, event="Working Interrupted", info=priority_score)
-                operation.progress += (self.env.now - working_start)
-                self.monitor.operations_interrupted[operation.id] = operation
-                interrupted = True
+                    self.monitor.record(self.env.now, "Move_to", crane=self.name,
+                                        location=self.location_mapping[self.current_coord].name, plate=None)
             else:
+                if not avoidance:
+                    idx += 1
+                    if self.status == "loading":
+                        plate_name = self.get_plate(self.target_location)
+                        if self.monitor.record_events:
+                            self.monitor.record(self.env.now, "Pick_up", crane=self.name,
+                                                location=self.location_mapping[crane.current_coord].name,
+                                                plate=plate_name)
+                    else:
+                        plate_name = self.put_plate(self.target_location)
+                        if self.monitor.record_events:
+                            self.monitor.record(self.env.now, "Put_down", crane=self.name,
+                                                location=self.location_mapping[crane.current_coord].name,
+                                                plate=plate_name)
+            finally:
+                actual_moving_time = self.env.now - self.start_time
+                x_coord = self.current_location[0] + actual_moving_time * self.x_velocity * np.sign(dx)
+                y_coord = self.current_location[1] + actual_moving_time * self.y_velocity * np.sign(dy)
+                x_coord = np.clip(x_coord, self.bay_range[0], self.bay_range[1])
+                y_coord = np.clip(y_coord, self.row_range[0], self.row_range[1])
+                self.current_location = (x_coord, y_coord)
+
 
     def check_interference(self):
         if self.other_crane.status == "idle":
             flag = False
+            safety_xcoord = None
         else:
             dx = self.target_location[0] - self.current_location[0]
             dy = self.target_location[1] - self.current_location[1]
-            direction_crane = np.sign(dx)
-            moving_time_crane = max(abs(dx) / self.x_velocity, abs(dy) / self.y_velocity)
+            direction = np.sign(dx)
+            moving_time = max(abs(dx) / self.x_velocity, abs(dy) / self.y_velocity)
 
-            trajectory_opposite_crane = []
-            if self.other_crane.status == "loading":
-                target_location = self.other_crane.from_locations[0]
-            elif self.other_crane.status == "unloading":
-                location_list = self.other_crane.to_locations[0]
+            elapsed_time = self.env.now - self.other_crane.start_time
+            dx_other = self.other_crane.target_location[0] - self.other_crane.current_location[0]
+            dy_other = self.other_crane.target_location[1] - self.other_crane.current_location[1]
+            direction_other = np.sign(dx_other)
+            moving_time_other = max(abs(dx_other) / self.other_crane.x_velocity,
+                                    abs(dy_other) / self.other_crane.y_velocity)
+            moving_time_other = moving_time_other - elapsed_time
+
+            min_moving_time = min(moving_time, moving_time_other)
+            xcoord = self.current_location[0] + min_moving_time * self.x_velocity * direction
+            xcoord_other = (self.other_crane.current_location[0]
+                            + (min_moving_time + elapsed_time) * self.other_crane.x_velocity * direction_other)
+
+            if self.id == 0 and xcoord >= xcoord_other - self.safety_margin:
+                flag = True
+                safety_xcoord = self.other_crane.target_location[0] - self.safety_margin - 1
+            elif self.id == 1 and xcoord <= xcoord_other + self.safety_margin:
+                flag = True
+                safety_xcoord = self.other_crane.target_location[0] + self.safety_margin + 1
             else:
-                location_list = []
+                flag = False
+                safety_xcoord = None
 
-            current_coord_opposite_crane = crane.opposite.current_coord
-            for location in location_list:
-                if location in self.piles.keys():
-                    dx = self.piles[location].coord[0] - current_coord_opposite_crane[0]
-                    dy = self.piles[location].coord[1] - current_coord_opposite_crane[1]
-                else:
-                    dx = self.conveyors[location].coord[0] - current_coord_opposite_crane[0]
-                    dy = 0
+        return flag, safety_xcoord
 
-                direction_opposite_crane = np.sign(dx)
-                moving_time_opposite_crane = max(abs(dx) / crane.opposite.x_velocity,
-                                                 abs(dy) / crane.opposite.y_velocity)
-                if location in self.piles.keys():
-                    coord_opposite_crane = self.piles[location].coord
-                else:
-                    coord_opposite_crane = (self.conveyors[location].coord[0], current_coord_opposite_crane[1])
-                trajectory_opposite_crane.append(
-                    (direction_opposite_crane, moving_time_opposite_crane, coord_opposite_crane))
-                current_coord_opposite_crane = coord_opposite_crane
+    def get_plate(self, location_id):
+        if self.job_type == "storage":
+            location = self.input_points[location_id]
+        elif self.job_type == "reshuffle" or self.job_type == "retrieval":
+            location = self.piles[location_id]
+        else:
+            print("invalid job type")
 
-            current_coord_opposite_crane = crane.opposite.current_coord
-            moving_time_cum = 0.0
-            avoidance = False
-            safety_xcoord = None
-            for i, move in enumerate(trajectory_opposite_crane):
-                if moving_time_crane <= move[1] + moving_time_cum:
-                    min_moving_time = moving_time_crane
-                    min_crane = crane.name
-                else:
-                    min_moving_time = move[1] + moving_time_cum
-                    min_crane = crane.opposite.name
+        plate = location.get_plate()
+        self.plates.append(plate)
+        return plate
 
-                xcoord_crane = crane.current_coord[0] + min_moving_time * crane.x_velocity * direction_crane
-                xcoord_opposite_crane = (current_coord_opposite_crane[0] + (min_moving_time - moving_time_cum)
-                                         * crane.opposite.x_velocity * move[0])
+    def put_plate(self, location_id, plate):
+        if self.job_type == "storage" or self.job_type == "reshuffle":
+            location = self.piles[location_id]
+        elif self.job_type == "retrieval":
+            location = self.conveyors[location_id]
+        else:
+            print("invalid job type")
 
-                if (crane.name == 'Crane-1' and xcoord_crane > xcoord_opposite_crane - self.safety_margin) \
-                        or (
-                        crane.name == 'Crane-2' and xcoord_crane < xcoord_opposite_crane + self.safety_margin):
-                    avoidance = True
-                    if crane.name == 'Crane-1':
-                        safety_xcoord = min(
-                            [temp[2][0] for temp in trajectory_opposite_crane[i:]]) - self.safety_margin
-                    else:
-                        safety_xcoord = max(
-                            [temp[2][0] for temp in trajectory_opposite_crane[i:]]) + self.safety_margin
-                    break
-                else:
-                    if crane.name == min_crane:
-                        check_same_pile = ((crane.loading and crane.opposite.loading)
-                                           or (crane.loading and crane.opposite.unloading)
-                                           or (crane.unloading and crane.opposite.unloading))
-                        same_pile = False
-                        if check_same_pile:
-                            for temp in trajectory_opposite_crane[i:]:
-                                if crane.target_coord[0] == temp[2][0] and crane.target_coord[1] == temp[2][1]:
-                                    same_pile = True
-
-                        if same_pile:
-                            avoidance = True
-                            if crane.name == "Crane-1":
-                                safety_xcoord = crane.target_coord[0] - self.safety_margin
-                            else:
-                                safety_xcoord = crane.target_coord[0] + self.safety_margin
-                        else:
-                            avoidance = False
-                            safety_xcoord = None
-                        break
-                    else:
-                        if len(trajectory_opposite_crane) == i + 1:
-                            avoidance = False
-                            safety_xcoord = None
-                        else:
-                            current_coord_opposite_crane = move[2]
-                            moving_time_cum = min_moving_time
-
-        return avoidance, safety_xcoord
-
-
-
-
-
-
-
-
-
-
-
-
+        location.put_plate(plate)
 
 
 class Conveyor:
-    def __init__(self, name, coord, IAT):
+    def __init__(self, env, name, id, coord, IAT, monitor):
+        self.env = env
         self.name = name
+        self.id = id
         self.coord = [coord]
         self.IAT = IAT
+        self.monitor = monitor
 
+        self.event_retrieval = None
         self.plates_retrieved = []
 
-
-class Management:
-    def __init__(self, env, df_storage, df_reshuffle, df_retrieval, cranes, piles, conveyors,
-                 row_range=(0, 1), bay_range=(0, 43), input_points=(0,), output_points=(22, 26, 43)):
-        self.env = env
-        self.df_storage = df_storage
-        self.df_reshuffle = df_reshuffle
-        self.df_retrieval = df_retrieval
-        self.cranes = cranes
-        self.piles = piles
-        self.conveyors = conveyors
-        self.row_range = row_range
-        self.bay_range = bay_range
-        self.input_points = input_points
-        self.output_points = output_points
-
-        self.retrieval_events = simpy.Store(env)
-
-        self.sequencing_required = False
-        self.prioritizing_required = False
-        self.loading_required = False
-
+        self.action = env.process(self.run())
 
     def run(self):
-        yield get
+        while True:
+            IAT = np.random.geometric(self.IAT)
+            yield self.env.timeout(IAT)
+            if self.monitor.record_events:
+                self.monitor.record(self.env.now, "Retrieval", crane=None, location=self.name, plate=None)
 
+            self.monitor.queue_retireval[self.id] = self
+            self.event_retrieval = self.env.event()
+            yield self.event_retrieval
 
-    def initialize(self):
-
-
+    def put_plate(self, plate):
+        self.plates_retrieved.append(plate)
 
 
 

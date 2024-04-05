@@ -48,7 +48,6 @@ class Pile:
         self.plates = plates
         self.monitor = monitor
 
-        self.blocking = []
         self.plates_stacked = []
         self.call = None
 
@@ -57,7 +56,7 @@ class Pile:
 
     def run(self):
         while len(self.plates) != 0:
-            if type == "reshuffle":
+            if type == "storage":
                 self.monitor.queue_reshuffle[self.id] = self
             elif type == "retrieval":
                 self.monitor.queue_retireval[self.id] = self
@@ -174,13 +173,15 @@ class Crane:
 
                 waiting_start = self.env.now
                 if self.monitor.record_events:
-                    self.monitor.record(self.env.now, "Waiting Start", crane=self.name, location=self.current_location)
+                    self.monitor.record(self.env.now, "Waiting Start", crane=self.name,
+                                        location=self.current_location.name, plate=None)
 
                 yield self.idle
 
                 waiting_finish = self.env.now
                 if self.monitor.record_events:
-                    self.monitor.record(self.env.now, "Waiting Finish", crane=self.name, location=self.current_location)
+                    self.monitor.record(self.env.now, "Waiting Finish", crane=self.name,
+                                        location=self.current_location.name, plate=None)
 
                 self.idle_time += waiting_finish - waiting_start
             else:
@@ -267,13 +268,14 @@ class Crane:
                 if not avoidance:
                     idx += 1
                     if self.status == "loading":
-                        plate = self.get_plate(self.target_location)
+                        plate = self.target_location.get_plate()
+                        self.plates.append(plate)
                         if self.monitor.record_events:
                             self.monitor.record(self.env.now, "Pick_up", crane=self.name,
                                                 location=self.target_location.name, plate=plate.name)
                     else:
                         plate = self.plates.pop()
-                        self.put_plate(self.target_location, plate)
+                        self.target_location.put_plate(plate)
                         if self.monitor.record_events:
                             self.monitor.record(self.env.now, "Put_down", crane=self.name,
                                                 location=self.target_location.name, plate=plate.name)
@@ -319,11 +321,3 @@ class Crane:
                 safety_xcoord = None
 
         return flag, safety_xcoord
-
-    def get_plate(self, location):
-        plate = location.get_plate()
-        self.plates.append(plate)
-        return plate
-
-    def put_plate(self, location, plate):
-        location.put_plate(plate)

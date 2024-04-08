@@ -97,8 +97,8 @@ class OutputPoint:
                 self.monitor.record(self.env.now, "Retrieval", crane=None, location=self.name, plate=None)
 
             self.monitor.queue_retireval[self.id] = self
-            self.event_retrieval = self.env.event()
-            yield self.event_retrieval
+            self.call = self.env.event()
+            yield self.call
 
     def put_plate(self, plate):
         self.plates_retrieved.append(plate)
@@ -123,8 +123,10 @@ class Crane:
         self.row_range = row_range
         self.bay_range = bay_range
 
+        # 크레인 위치 정보
         self.target_location = None
         self.target_location_coord = (-1.0, -1.0)
+        self.current_location = initial_location
         self.current_location_coord = initial_location.coord
         self.safety_xcoord = -1.0
 
@@ -133,20 +135,23 @@ class Crane:
         self.unloading_location_ids = []
         self.plates = []
 
-        self.idle = None
+        # 크레인 작업 정보
         self.job_type = None
         self.status = "idle"
-        self.unloading = False
 
+        # 의사결정을 위한 이벤트 생성
+        self.idle = None
         self.event_sequencing = None
         self.event_loading = None
         self.event_prioritizing = None
 
+        # 크레인 관련 지표 기록
         self.start_time = 0.0
         self.idle_time = 0.0
         self.empty_travel_time = 0.0
         self.avoiding_time = 0.0
 
+        # 위치 좌표 별 input point / pile / outpoint ID 매핑
         self.coord_to_id = {}
         for id, input_point in input_points.items():
             for i in range(row_range[0], row_range[1] + 1):
@@ -164,10 +169,12 @@ class Crane:
 
     def run(self):
         while True:
+            # 크레인 작업 분배 및 작업 순서 결정과 관련한 의사결정
             self.monitor.queue_sequencing[self.id] = self
             self.event_sequencing = self.env.event()
             target_location_id, target_location_code = yield self.event_sequencing
 
+            # 해당 크레인이 이동 가능한 강재가 없을 시 대기
             if target_location_code == "None":
                 self.idle = self.env.event()
 
@@ -184,6 +191,7 @@ class Crane:
                                         location=self.current_location.name, plate=None)
 
                 self.idle_time += waiting_finish - waiting_start
+            # 해당 크레인이 이동 가능한 강재가 있을 시 작업 시작
             else:
                 self.status = "loading"
 
@@ -197,15 +205,18 @@ class Crane:
                     self.job_type = "retrieval"
                     self.offset_location = self.output_points[target_location_id]
 
+                # 동시 이동할 복수 강재 선택을 위한 의사결정
                 self.monitor.queue_loading[self.id] = self
                 self.event_loading = self.env.event()
                 self.loading_location_ids = yield self.event_loading
                 self.unloading_location_ids = self.loading_location_ids[::-1]
 
+                # 크레인 loading 프로세스 수행
                 self.move_process = self.env.process(self.move())
                 yield self.move_process
                 self.loading_location_ids = []
 
+                # 크레인 unloading 프로세스 실행
                 self.status = "unloading"
 
                 self.move_process = self.env.process(self.move())
@@ -237,7 +248,6 @@ class Crane:
             flag, safety_xcoord = self.check_interference()
             if flag:
                 self.other_crane.move_process.interrupt()
-
                 self.monitor.queue_prioritizing[self.id] = self
                 self.event_prioritizing = self.env.event()
                 priority = yield self.event_prioritizing

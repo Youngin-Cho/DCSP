@@ -138,9 +138,11 @@ class Crane:
         # 크레인 작업 정보
         self.job_type = None
         self.status = "idle"
+        self.waiting_for_avoidance = False
 
         # 의사결정을 위한 이벤트 생성
         self.idle = None
+        self.wait = None
         self.event_sequencing = None
         self.event_loading = None
         self.event_prioritizing = None
@@ -150,8 +152,9 @@ class Crane:
         self.idle_time = 0.0
         self.empty_travel_time = 0.0
         self.avoiding_time = 0.0
+        self.extended_moving_time = 0.0
 
-        # 위치 좌표 별 input point / pile / outpoint ID 매핑
+        # 위치 좌표 별 input point / pile / output point ID 매핑
         self.coord_to_id = {}
         for id, input_point in input_points.items():
             for i in range(row_range[0], row_range[1] + 1):
@@ -178,19 +181,19 @@ class Crane:
             if target_location_code == "None":
                 self.idle = self.env.event()
 
-                waiting_start = self.env.now
+                idle_start = self.env.now
                 if self.monitor.record_events:
-                    self.monitor.record(self.env.now, "Waiting Start", crane=self.name,
+                    self.monitor.record(self.env.now, "Idle_Start", crane=self.name,
                                         location=self.current_location.name, plate=None)
 
                 yield self.idle
 
-                waiting_finish = self.env.now
+                idle_finish = self.env.now
                 if self.monitor.record_events:
-                    self.monitor.record(self.env.now, "Waiting Finish", crane=self.name,
+                    self.monitor.record(self.env.now, "Idle_Finish", crane=self.name,
                                         location=self.current_location.name, plate=None)
 
-                self.idle_time += waiting_finish - waiting_start
+                self.idle_time += idle_finish - idle_start
             # 해당 크레인이 이동 가능한 강재가 있을 시 작업 시작
             else:
                 self.status = "loading"
@@ -246,6 +249,9 @@ class Crane:
                 self.target_location_coord = (self.target_location.coord[0], self.current_location_coord[1])
 
             flag, safety_xcoord = self.check_interference()
+            if self.other_crane.waiting_for_avoidance:
+                self.other_crane.wait.succed()
+
             if flag:
                 self.other_crane.move_process.interrupt()
                 self.monitor.queue_prioritizing[self.id] = self
@@ -270,9 +276,38 @@ class Crane:
 
                 predicted_moving_time = min(abs(dx) / self.x_velocity, abs(dy) / self.y_velocity)
                 yield self.env.timeout(predicted_moving_time)
-            except simpy.Interrupt as i:
+
                 if self.monitor.record_events:
                     self.monitor.record(self.env.now, "Move_to", crane=self.name,
+                                        location=self.current_location.name, plate=None)
+
+                if self.extended_moving_time > 0.0:
+                    self.avoiding_time += self.extended_moving_time
+                    self.extended_moving_time = 0.0
+
+                if np.sign(dx) != np.sign(self.target_location_coord[0] - self.current_location_coord[0]):
+                    self.extended_moving_time = predicted_moving_time
+                    self.avoiding_time += self.extended_moving_time
+
+                if avoidance:
+                    self.waiting_for_avoidance = True
+                    if self.monitor.record_events:
+                        self.monitor.record(self.env.now, "Waiting_start", crane=self.name,
+                                            location=self.current_location.name, plate=None)
+
+                    waiting_start = self.env.now()
+                    self.wait = self.env.event()
+                    yield self.wait
+                    waiting_finish = self.env.now()
+
+                    self.monitor.record(self.env.now, "Waiting_finish", crane=self.name,
+                                        location=self.current_location.name, plate=None)
+
+                    self.avoiding_time += waiting_finish - waiting_start
+                    self.waiting_for_avoidance = False
+            except simpy.Interrupt as i:
+                if self.monitor.record_events:
+                    self.monitor.record(self.env.now, "Interference_predicted", crane=self.name,
                                         location=self.current_location.name, plate=None)
             else:
                 if not avoidance:
@@ -298,7 +333,7 @@ class Crane:
                 self.current_location_coord = (x_coord, y_coord)
 
     def check_interference(self):
-        if self.other_crane.status == "idle":
+        if self.other_crane.status == "idle" or self.other_crane.waiting_for_avoidance:
             flag = False
             safety_xcoord = None
         else:

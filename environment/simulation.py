@@ -16,11 +16,11 @@ class Plate:
 
 
 class InputPoint:
-    def __init__(self, env, name, id, location, plates, monitor):
+    def __init__(self, env, name, id, coord, plates, monitor):
         self.env = env
         self.name = name
         self.id = id
-        self.location = location
+        self.coord = coord
         self.plates = plates
         self.monitor = monitor
 
@@ -39,12 +39,12 @@ class InputPoint:
 
 
 class Pile:
-    def __init__(self, env, name, id, type, location, plates, monitor):
+    def __init__(self, env, name, id, type, coord, plates, monitor):
         self.env = env
         self.name = name
         self.id = id
         self.type = type
-        self.location = location
+        self.coord = coord
         self.plates = plates
         self.monitor = monitor
 
@@ -75,13 +75,12 @@ class Pile:
 
 
 class OutputPoint:
-    def __init__(self, env, name, id, type, location, IAT, monitor):
+    def __init__(self, env, name, id, coord, irt, monitor):
         self.env = env
         self.name = name
         self.id = id
-        self.type = type
-        self.location = location
-        self.IAT = IAT
+        self.coord = coord
+        self.irt = irt
         self.monitor = monitor
 
         self.plates_retrieved = []
@@ -91,8 +90,8 @@ class OutputPoint:
 
     def run(self):
         while True:
-            IAT = np.random.geometric(self.IAT)
-            yield self.env.timeout(IAT)
+            irt = np.random.geometric(self.irt)
+            yield self.env.timeout(irt)
             if self.monitor.record_events:
                 self.monitor.record(self.env.now, "Retrieval", crane=None, location=self.name, plate=None)
 
@@ -105,23 +104,23 @@ class OutputPoint:
 
 
 class Crane:
-    def __init__(self, env, name, id, x_velocity, y_velocity, safety_margin, weight_limit, initial_location,
-                 other_crane, input_points, piles, output_points, monitor, row_range=(0, 1), bay_range=(0, 43)):
+    def __init__(self, env, name, id, velocity, safety_margin, initial_location,
+                 input_points, piles, output_points, monitor, row_range=(0, 1), bay_range=(0, 43)):
         self.env = env
         self.name = name
         self.id = id
-        self.x_velocity = x_velocity
-        self.y_velocity = y_velocity
+        self.x_velocity = velocity[0]
+        self.y_velocity = velocity[1]
         self.safety_margin = safety_margin
-        self.weight_limit = weight_limit
         self.initial_location = initial_location
-        self.other_crane = other_crane
         self.input_points = input_points
         self.piles = piles
         self.output_points = output_points
         self.monitor = monitor
         self.row_range = row_range
         self.bay_range = bay_range
+
+        self.other_crane = None
 
         # 크레인 위치 정보
         self.target_location = None
@@ -196,8 +195,6 @@ class Crane:
                 self.idle_time += idle_finish - idle_start
             # 해당 크레인이 이동 가능한 강재가 있을 시 작업 시작
             else:
-                self.status = "loading"
-
                 if target_location_code == "input_point":
                     self.job_type = "storage"
                     self.offset_location = self.input_points[target_location_id]
@@ -215,13 +212,13 @@ class Crane:
                 self.unloading_location_ids = self.loading_location_ids[::-1]
 
                 # 크레인 loading 프로세스 수행
+                self.status = "loading"
                 self.move_process = self.env.process(self.move())
                 yield self.move_process
                 self.loading_location_ids = []
 
                 # 크레인 unloading 프로세스 실행
                 self.status = "unloading"
-
                 self.move_process = self.env.process(self.move())
                 yield self.move_process
                 self.unloading_location_ids = []
@@ -366,3 +363,56 @@ class Crane:
                 safety_xcoord = None
 
         return flag, safety_xcoord
+
+
+class Monitor:
+    def __init__(self, record_events=False):
+        self.record_events = record_events
+
+        self.queue_sequencing = {}
+        self.queue_loading = {}
+        self.queue_prioritizing = {}
+
+        self.time = []
+        self.event = []
+        self.crane = []
+        self.location = []
+        self.plate = []
+        self.tag = []
+
+    def request_scheduling(self):
+        flag = False
+        if len(self.queue_prioritizing) != 0:
+            flag = True
+            info = "prioritizing"
+        else:
+            if len(self.queue_sequencing) != 0:
+                flag = True
+                info = "sequencing"
+            else:
+                if len(self.queue_loading) != 0:
+                    flag = True
+                    info = "loading"
+        return flag, info
+
+    def record(self, time, event, crane=None, location=None, plate=None, tag=None):
+        self.time.append(time)
+        self.event.append(event)
+        self.crane.append(crane)
+        self.location.append(location)
+        self.plate.append(plate)
+        self.tag.append(tag)
+
+    def get_logs(self, file_path=None):
+        records = pd.DataFrame(columns=["Time", "Event", "Crane", "Location", "Plate", "Tag"])
+        records["Time"] = self.time
+        records["Event"] = self.event
+        records["Crane"] = self.crane
+        records["Location"] = self.location
+        records["Plate"] = self.plate
+        records["Tag"] = self.tag
+
+        if file_path is not None:
+            records.to_csv(file_path, index=False)
+
+        return records

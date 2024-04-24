@@ -1,0 +1,56 @@
+{
+    "row_range": [
+        0,
+        1
+    ],
+    "bay_range": [
+        0,
+        43
+    ],
+    "retrieval_pile_range": [
+        16,
+        33
+    ],
+    "input_point_coords": [
+        0
+    ],
+    "output_point_coords": [
+        22,
+        26,
+        43
+    ],
+    "inter_retrieval_times": {
+        "22": 0.01,
+        "26": 0.01,
+        "43": 0.005
+    },
+    "num_to_piles_for_storage": [
+        5
+    ],
+    "num_from_piles_for_reshuffle": 10,
+    "num_to_piles_for_reshuffle": 10,
+    "num_from_piles_for_retrieval": {
+        "22": 5,
+        "26": 5,
+        "43": 2
+    },
+    "num_plates_for_storage": 150,
+    "num_plates_for_reshuffle": 150,
+    "num_plates_for_retrieval": 150,
+    "crane_velocity": [
+        0.5,
+        1.0
+    ],
+    "weight_limit": 20.0,
+    "number_limit": 3,
+    "pile_limit": 2,
+    "crane_1_initial_coord": [
+        1,
+        0
+    ],
+    "crane_2_initial_coord": [
+        42,
+        0
+    ],
+    "safety_margin": 5
+}

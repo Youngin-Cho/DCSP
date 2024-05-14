@@ -4,106 +4,81 @@ import numpy as np
 import pandas as pd
 
 
-def read_data(file_name, bay=1, num_crane=1):
-    df = pd.read_csv(file_name, encoding="CP949")
-
-    if bay == 1:
-        bay_list = ["A", "B"]
-    elif bay == 2:
-        bay_list = ["C", "D"]
-    elif bay == 3:
-        bay_list = ["E", "F"]
-    elif bay == 4:
-        bay_list = ["S", "T"]
-    else:
-        raise KeyError("invalid input value: {0} BAY".format(bay))
-
-    data = {"Crane-%d" % i : {} for i in range(1, num_crane + 1)}
-    for i in range(1, num_crane + 1):
-        pile_range = range(int(40 * (i - 1) / num_crane) + 1, int(40 * i / num_crane) + 1)
-        pile_list = [row_id + str(col_id).rjust(2, '0') for row_id in bay_list for col_id in pile_range]
-        df_sub = df[df['pileno'].isin(pile_list)]
-
-        df_sorting = df_sub[df_sub["topile"].isin(pile_list)]
-        from_piles = list(df_sorting["pileno"].unique())
-        to_piles = {}
-        for from_pile in from_piles:
-            temp = df_sorting[df_sorting["pileno"] == from_pile]
-            temp = temp[temp["topile"].isin(from_piles)]
-            to_piles[from_pile] = list(temp["topile"].unique())
-
-        remove_list = {i:[] for i in from_piles}
-        for from_pile in from_piles:
-            for to_pile in to_piles[from_pile]:
-                if from_pile in to_piles[to_pile]:
-                    remove_list[from_pile].append(to_pile)
-
-        for key, value in remove_list.items():
-            df_sorting = df_sorting[~((df_sorting["pileno"] == key) & (df_sorting["topile"].isin(value)))]
-        df_sorting = df_sorting.sort_values(by=["pileno", "pileseq"])
-
-        df_release = df_sub[df_sub["topile"].isin(["CN1", "CN2"])]
-        df_release = df_release[~df_release["pileno"].isin(df_sorting["pileno"])]
-        df_release = df_release.sort_values(by=["pileno", "pileseq"])
-
-        data["Crane-%d" % i]["num_from_pile"] = len(df_sorting["pileno"].unique())
-        data["Crane-%d" % i]["num_to_pile"] = len(df_sorting["topile"].unique())
-        data["Crane-%d" % i]["num_release_pile"] = 0  # len(df_release["pileno"].unique())
-        data["Crane-%d" % i]["sorting_plan"] = df_sorting
-        data["Crane-%d" % i]["release_plan"] = df_release
-
-    return data
-
-
 class DataGenerator:
-    def __init__(self, rows=("A", "B"),  # row 이름x
-                       storage=True,  # 적치 계획 데이터를 생성할 지 여부
-                       reshuffle=True,  # 선별 계획 데이터를 생성할 지 여부
-                       retrieval=True,  # 출고 계획 데이터를 생성할 지 여부
-                       n_bays_in_area1=15,  # 1번 영역 내 bay의 수
-                       n_bays_in_area2=6,  # 2번 영역 내 bay의 수
-                       n_bays_in_area3=3,  # 3번 영역 내 bay의 수
-                       n_bays_in_area4=6,  # 4번 영역 내 bay의 수
-                       n_bays_in_area5=10,  # 5번 영역 내 bay의 수
-                       n_bays_in_area6=1,  # 6번 영역 내 bay의 수
-                       n_from_piles_storage=2,  # 적치 작업의 대상 강재가 적치된 가상 파일의 수 (from pile)
-                       n_to_piles_storage=5,  # 적치 작업의 대상 강재가 이동할 파일의 수 (to pile)
-                       n_from_piles_reshuffle=10,  # 선별 작업의 대상 강재가 적치된 파일의 수 (from pile)
-                       n_to_piles_reshuffle=10,   # 선별 작업의 대상 강재가 이동할 파일의 수 (to pile)
-                       n_from_piles_retrieval_cn1=5,  # cn1 출고 작업의 대상 강재가 적치된 파일의 수 (from pile)
-                       n_from_piles_retrieval_cn2=5,  # cn2 출고 작업의 대상 강재가 적치된 파일의 수 (from pile)
-                       n_from_piles_retrieval_cn3=2,  # cn3 출고 작업의 대상 강재가 적치된 파일의 수 (from pile)
-                       n_plates_storage=150,  # 입고 지점에 위치한 적치 대상 강재의 평균 개수
-                       n_plates_reshuffle=150,  # 각 파일에 위치한 선별 대상 강재의 평균 개수
-                       n_plates_retrieval=150,  # 각 파일에 위치한 출고 대상 강재의 평균 개수
-                       working_crane_ids=("Crane-1", "Crane-2"),  # 작업을 수행할 크레인
-                       safety_margin=5,  # 크레인 간 안전 거리
-                 ):
+    def __init__(self, config):
+        self.num_to_piles_for_storage = config['num_to_piles_for_storage']
+        self.num_from_piles_for_reshuffle = config['num_from_piles_for_reshuffle']
+        self.num_to_piles_for_reshuffle = config['num_to_piles_for_reshuffle']
+        self.num_from_piles_for_retrieval = config['num_from_piles_for_retrieval']
+        self.num_plates_for_storage = config['num_plates_for_storage']
+        self.num_plates_for_reshuffle = config['num_plates_for_reshuffle']
+        self.num_plates_for_retrieval = config['num_plates_for_retrieval']
+        self.safety_margin = config['safety_margin']
+        self.storage_piles, self.retrieval_piles = self.read_config(config)
 
-        self.rows = rows
-        self.storage = storage
-        self.reshuffle = reshuffle
-        self.retrieval = retrieval
-        self.n_bays_in_area1 = n_bays_in_area1
-        self.n_bays_in_area2 = n_bays_in_area2
-        self.n_bays_in_area3 = n_bays_in_area3
-        self.n_bays_in_area4 = n_bays_in_area4
-        self.n_bays_in_area5 = n_bays_in_area5
-        self.n_bays_in_area6 = n_bays_in_area6
-        self.n_from_piles_storage = n_from_piles_storage
-        self.n_to_piles_storage = n_to_piles_storage
-        self.n_from_piles_reshuffle = n_from_piles_reshuffle
-        self.n_to_piles_reshuffle = n_to_piles_reshuffle
-        self.n_from_piles_retrieval_cn1 = n_from_piles_retrieval_cn1
-        self.n_from_piles_retrieval_cn2 = n_from_piles_retrieval_cn2
-        self.n_from_piles_retrieval_cn3 = n_from_piles_retrieval_cn3
-        self.n_plates_storage = n_plates_storage
-        self.n_plates_reshuffle = n_plates_reshuffle
-        self.n_plates_retrieval = n_plates_retrieval
-        self.working_crane_ids = working_crane_ids
-        self.safety_margin = safety_margin
+    def read_config(self, config):
+        row_range = config['row_range']
+        bay_range = config['bay_range']
+        input_point_coords = config['input_point_coords']
+        output_point_coords = config['output_point_coords']
+        storage_pile_range = config['storage_pile_range']
+        retrieval_pile_range = config['retrieval_pile_range']
+
+        storage_piles = {key:{} for key in input_point_coords}
+        retrieval_piles = {key:{} for key in output_point_coords}
+        for row_id in range(row_range[0], row_range[0] + 1):
+            for col_id in range(bay_range[0], bay_range[1] + 1):
+                if (not col_id in input_point_coords) and (not col_id in output_point_coords):
+                    flag = True
+                    for key in retrieval_pile_range.keys():
+                        min_col, max_col = retrieval_pile_range[key]
+                        if min_col <= col_id <= max_col:
+                            retrieval_piles[int(key)][col_id] = "%s%d" % (chr(row_id + 65), col_id)
+                            flag = False
+                    if flag:
+                        for key in storage_pile_range.keys():
+                            min_col, max_col = storage_pile_range[key]
+                            if min_col <= col_id <= max_col:
+                                storage_piles[int(key)][col_id] = "%s%d" % (chr(row_id + 65), col_id)
+
+        return storage_piles, retrieval_piles
 
     def generate(self, file_path=None):
+        df_storage = pd.DataFrame(columns=["pileno", "pileseq", "markno", "unitw", "topile"])
+        df_reshuffle = pd.DataFrame(columns=["pileno", "pileseq", "markno", "unitw", "topile"])
+        df_retrieval = pd.DataFrame(columns=["pileno", "pileseq", "markno", "unitw", "topile"])
+
+        if self.num_plates_for_retrieval > 0:
+            candidates = piles_in_area2 + piles_in_area3 + piles_in_area4
+            # candidates = [i for i in candidates if not i in ["A22", "A23", "A24", "B22", "B23", "B24"]]
+            from_piles_retrieval_cn1 = random.sample(candidates, self.n_from_piles_retrieval_cn1)
+            candidates = [i for i in candidates if not i in from_piles_retrieval_cn1]
+            from_piles_retrieval_cn2 = random.sample(candidates, self.n_from_piles_retrieval_cn2)
+            if "Crane-2" in self.working_crane_ids:
+                candidates = piles_in_area6
+                from_piles_retrieval_cn3 = random.sample(candidates, self.n_from_piles_retrieval_cn3)
+            else:
+                from_piles_retrieval_cn3 = []
+            from_piles_retrieval = from_piles_retrieval_cn1 + from_piles_retrieval_cn2 + from_piles_retrieval_cn3
+            for pile in from_piles_retrieval:
+                num_of_plates = random.randint(int(0.9 * self.n_plates_retrieval), int(1.1 * self.n_plates_retrieval))
+                pileno = [pile] * num_of_plates
+                pileseq = [str(i).rjust(3, '0') for i in range(1, num_of_plates + 1)]
+                markno = ["SP-RT-%s-%s" % (pile, i) for i in pileseq]
+                unitw = np.random.uniform(0.141, 19.294, num_of_plates)
+                if pile in from_piles_retrieval_cn1:
+                    topile = ["cn1"] * num_of_plates
+                elif pile in from_piles_retrieval_cn2:
+                    topile = ["cn2"] * num_of_plates
+                else:
+                    topile = ["cn3"] * num_of_plates
+                df_temp = pd.DataFrame(
+                    {"pileno": pileno, "pileseq": pileseq, "markno": markno, "unitw": unitw, "topile": topile})
+                df_retrieval = pd.concat([df_retrieval, df_temp], ignore_index=True)
+        else:
+            from_piles_retrieval = []
+
+    def generate_pre(self, file_path=None):
         # 입고, 선별, 출고 데이터를 저장하기 위한 데이터프레임 생성
         df_storage = pd.DataFrame(columns=["pileno", "pileseq", "markno", "unitw", "topile"])
         df_reshuffle = pd.DataFrame(columns=["pileno", "pileseq", "markno", "unitw", "topile"])
@@ -251,62 +226,9 @@ class DataGenerator:
 
 
 if __name__ == '__main__':
-    rows = ("A", "B")
+    import json
+    config_path = "../input/env_config.json"
+    with open(config_path, 'r') as f:
+        config = json.load(f)
 
-    storage = True
-    reshuffle = True
-    retrieval = True
-
-    n_bays_in_area1 = 15
-    n_bays_in_area2 = 6
-    n_bays_in_area3 = 3
-    n_bays_in_area4 = 6
-    n_bays_in_area5 = 9
-    n_bays_in_area6 = 1
-
-    n_from_piles_storage = 1
-    n_to_piles_storage = 5
-    n_from_piles_reshuffle = 10
-    n_to_piles_reshuffle = 10
-    n_from_piles_retrieval_cn1 = 5
-    n_from_piles_retrieval_cn2 = 5
-    n_from_piles_retrieval_cn3 = 2
-
-    n_plates_storage = 500
-    n_plates_reshuffle = 150
-    n_plates_retrieval = 150
-
-    working_crane_ids = ("Crane-1", "Crane-2")
-    safety_margin = 5
-    file_dir = "../input/data/validation/"
-
-    if not os.path.exists(file_dir):
-        os.makedirs(file_dir)
-
-    data_src = DataGenerator(rows=rows,
-                             storage=storage,
-                             reshuffle=reshuffle,
-                             retrieval=retrieval,
-                             n_bays_in_area1=n_bays_in_area1,
-                             n_bays_in_area2=n_bays_in_area2,
-                             n_bays_in_area3=n_bays_in_area3,
-                             n_bays_in_area4=n_bays_in_area4,
-                             n_bays_in_area5=n_bays_in_area5,
-                             n_bays_in_area6=n_bays_in_area6,
-                             n_from_piles_storage=n_from_piles_storage,
-                             n_to_piles_storage=n_to_piles_storage,
-                             n_from_piles_reshuffle=n_from_piles_reshuffle,
-                             n_to_piles_reshuffle=n_to_piles_reshuffle,
-                             n_from_piles_retrieval_cn1=n_from_piles_retrieval_cn1,
-                             n_from_piles_retrieval_cn2=n_from_piles_retrieval_cn2,
-                             n_from_piles_retrieval_cn3=n_from_piles_retrieval_cn3,
-                             n_plates_storage=n_plates_storage,
-                             n_plates_reshuffle=n_plates_reshuffle,
-                             n_plates_retrieval=n_plates_retrieval,
-                             working_crane_ids=working_crane_ids,
-                             safety_margin=safety_margin)
-
-    iteration = 5
-    for i in range(1, iteration + 1):
-        file_path = file_dir + "instance-{0}.xlsx".format(i)
-        df_storage, df_reshuffle, df_retrieval = data_src.generate(file_path=file_path)
+    data_src = DataGenerator(config)
